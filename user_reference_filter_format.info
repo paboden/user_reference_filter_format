@@ -1,0 +1,5 @@
+name = User Reference Filter Format
+description = text formatter to replace "@user_name" with a link to the users profile page
+core = 7.x
+
+dependencies[] = filter
