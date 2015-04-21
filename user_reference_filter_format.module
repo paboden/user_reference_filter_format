@@ -10,7 +10,7 @@
 function user_reference_filter_format_filter_info() {
   $filters['user_reference_filter'] = array(
     // Title is the text on the format settings checkbox.
-    'title' => t('@username replaced with a link to that users profile page.'),
+    'title' => t('<em>@user_reference</em> replaced with a link to that users profile page.'),
     // Callback function to process the matches we find.
     'process callback' => '_user_reference_filter_process',
     // Callback function to add the filter tip content.
@@ -31,8 +31,8 @@ function _user_reference_filter_process($text, $filter) {
   // Tags to skip and not recurse into.
   $ignore_tags = 'a|script|style|code|pre';
 
-  // Match @username.
-  $pattern = "/@([a-z0-9_]+)/i";
+  // Match @user_reference or @username or @42 (uid).
+  $pattern = "/[^\S]@([a-z0-9(\.\_\-\?\&\%\#)]+)/i";
 
   // Callback to process matched usernames
   $task = '_user_reference_parse_usernames';
@@ -44,7 +44,7 @@ function _user_reference_filter_process($text, $filter) {
   $text = preg_replace_callback('`<!--(.*?)-->`s', '_filter_url_escape_comments', $text);
 
   // Split at all tags; ensures that no tags or attributes are processed.
-  $chunks = preg_split('/(<.+?>)/is', $text, -1, PREG_SPLIT_DELIM_CAPTURE);
+  $chunks = preg_split('/(<.+?\/>)/is', $text, -1, PREG_SPLIT_DELIM_CAPTURE);
 
   // PHP ensures that the array consists of alternating delimiters and
   // literals, and begins and ends with a literal (inserting NULL as
@@ -100,21 +100,31 @@ function _user_reference_filter_process($text, $filter) {
  * Callback for preg_replace_callback() within _filter_url().
  */
 function _user_reference_parse_usernames($match) {
-  // Get the username from match array
-  $username = check_plain(decode_entities($match[1]));
+  $user = NULL;
 
-  // Load the user object from the username. This will return an object if a user
-  // exists. else it will return FALSE/NULL.
-  $account = user_load_by_name($username);
+  // Get the username from match array. If its completely numberic, try loading
+  // user by uid matching.
+  if (is_numeric($match[1]) && ($match[1] != 0)) {
+    $user = user_load($match[1]);
+  }
+  // if realname module, get the user object from the realname value.
+  elseif (module_exists('realname')) {
+    $name = check_plain(decode_entities($match[1]));
+    $name = str_replace('_', ' ', $name);
+    $uid = db_query("SELECT uid, realname FROM {realname} WHERE realname IN (:realname)", array(':realname' => $name))->fetchAssoc();
+    $user = !empty($uid) ? user_load($uid['uid']) : NULL;
+  }
+
+  // if realname or uid doesn't return anything, try getting user from username
+  // match.
+  $account = empty($user) ? user_load_by_name($match[1]) : $user;
 
   if (!empty($account)) {
-    // If their is a user object that matches the username, return a link to the
-    // users profile page.
-    return l('@' . $username, '/user/' . $account->uid, array('attributes' => array('class' => array('referenced-user-link', 'user-link'))));
-    //return theme('username', array('account' => $account));
+    // If username or realname returns, return a link to the users profile page.
+    return theme('user_reference_filter_format', array('account' => $account));
   }
   else {
-    // else just return the original text (first component in the match array)
+    // else just return the original text (first component in the match array).
     return $match[0];
   }
 }
@@ -123,5 +133,109 @@ function _user_reference_parse_usernames($match) {
  * Filter tips callback for user_reference_filter_format filter.
  */
 function _user_reference_filter_tips($filter, $format, $long = FALSE) {
-  return t('<em>@username</em> is replaced with the a link to that users profile page.');
+  return t('<em>@user_reference</em> is replaced with the a link to that users profile page.');
+}
+
+/**
+ * Implements hook_theme().
+ */
+function user_reference_filter_format_theme() {
+  return array(
+    'user_reference_filter_format' => array(
+      'variables' => array('account' => NULL),
+    ),
+  );
+}
+
+/**
+ * Returns HTML for a username, potentially linked to the user's page.
+ *
+ * @param $variables
+ *  This theme function is similar to theme_username. It's roots are in that
+ *  theme function.
+ *   An associative array containing:
+ *   - account: The user object to format.
+ *   - name: The user's name, sanitized.
+ *   - extra: Additional text to append to the user's name, sanitized.
+ *   - link_path: The path or URL of the user's profile page, home page, or
+ *     other desired page to link to for more information about the user.
+ *   - link_options: An array of options to pass to the l() function's $options
+ *     parameter if linking the user's name to the user's page.
+ *   - attributes_array: An array of attributes to pass to the
+ *     drupal_attributes() function if not linking to the user's page.
+ *
+ * @see template_preprocess_username_reference_filter_format()
+ * @see template_preprocess_username_reference_filter_format()
+ */
+function theme_user_reference_filter_format($variables) {
+  if (isset($variables['link_path'])) {
+    // We have a link path, so we should generate a link using l().
+    // Additional classes may be added as array elements like
+    // $variables['link_options']['attributes']['class'][] = 'myclass';
+    $output = l($variables['prefix'] . $variables['name'] . $variables['extra'], $variables['link_path'], $variables['link_options']);
+  }
+  else {
+    // Modules may have added important attributes so they must be included
+    // in the output. Additional classes may be added as array elements like
+    // $variables['attributes_array']['class'][] = 'myclass';
+    $output = '<span' . drupal_attributes($variables['attributes_array']) . '>' . $variables['prefix'] . $variables['name'] . $variables['extra'] . '</span>';
+  }
+  return $output;
+}
+
+/**
+ * Implements template_preprocess_HOOK().
+ *
+ * Preprocess function for theme_username_reference_filter_format. This function
+ * handles making sure that the links are proper to all users and makes sure all
+ * elements are ready to rock and roll.
+ *
+ */
+function template_preprocess_user_reference_filter_format(&$variables) {
+  $account = $variables ['account'];
+
+  $variables ['prefix'] = ' @';
+
+  $variables ['extra'] = '';
+  if (empty($account->uid)) {
+    $variables ['uid'] = 0;
+    if (theme_get_setting('toggle_comment_user_verification')) {
+      $variables ['extra'] = ' (' . t('not verified') . ')';
+    }
+  }
+  else {
+    $variables ['uid'] = (int) $account->uid;
+  }
+
+  // Set the name to a formatted name that is safe for printing and
+  // that won't break tables by being too long. Keep an unshortened,
+  // unsanitized version, in case other preprocess functions want to implement
+  // their own shortening logic or add markup. If they do so, they must ensure
+  // that $variables['name'] is safe for printing.
+  $name = $variables ['name_raw'] = format_username($account);
+  if (drupal_strlen($name) > 20) {
+    $name = drupal_substr($name, 0, 15) . '...';
+  }
+  $variables ['name'] = check_plain($name);
+
+  $variables ['profile_access'] = user_access('access user profiles');
+  $variables ['link_attributes'] = array();
+  // Populate link path and attributes if appropriate.
+  if ($variables ['uid'] && $variables ['profile_access']) {
+    // We are linking to a local user.
+    $variables ['link_attributes'] = array('title' => t('View user profile.'));
+    $variables ['link_path'] = 'user/' . $variables ['uid'];
+  }
+  elseif (!empty($account->homepage)) {
+    // Like the 'class' attribute, the 'rel' attribute can hold a
+    // space-separated set of values, so initialize it as an array to make it
+    // easier for other preprocess functions to append to it.
+    $variables ['link_attributes'] = array('rel' => array('nofollow'));
+    $variables ['link_path'] = $account->homepage;
+    $variables ['homepage'] = $account->homepage;
+  }
+  // We do not want the l() function to check_plain() a second time.
+  $variables ['link_options']['html'] = TRUE;
+  // Set a default class.
+  $variables ['attributes_array'] = array('class' => array('username'));
 }
