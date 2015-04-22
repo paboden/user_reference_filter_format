@@ -11,8 +11,10 @@ function user_reference_filter_format_filter_info() {
   $filters['user_reference_filter'] = array(
     // Title is the text on the format settings checkbox.
     'title' => t('<em>@user_reference</em> replaced with a link to that users profile page.'),
+
     // Callback function to process the matches we find.
     'process callback' => '_user_reference_filter_process',
+
     // Callback function to add the filter tip content.
     'tips callback' => '_user_reference_filter_tips',
   );
@@ -24,74 +26,39 @@ function user_reference_filter_format_filter_info() {
  * Implements callback_filter_process().
  *
  * Converts text into hyperlinks automatically.
- *
  * This filter identifies and makes clickable twitter style usernames (@username).
  */
 function _user_reference_filter_process($text, $filter) {
-  // Tags to skip and not recurse into.
-  $ignore_tags = 'a|script|style|code|pre';
-
   // Match @user_reference or @username or @42 (uid).
-  $pattern = "/[^\S]@([a-z0-9(\.\_\-\?\&\%\#)]+)/i";
+  $pattern = _user_reference_filter_get_pattern();
 
-  // Callback to process matched usernames
+  // Callback to process matched usernames.
   $task = '_user_reference_parse_usernames';
 
-  // HTML comments need to be handled separately, as they may contain HTML
-  // markup, especially a '>'. Therefore, remove all comment contents and add
-  // them back later.
-  _filter_url_escape_comments('', TRUE);
-  $text = preg_replace_callback('`<!--(.*?)-->`s', '_filter_url_escape_comments', $text);
-
-  // Split at all tags; ensures that no tags or attributes are processed.
-  $chunks = preg_split('/(<.+?\/>)/is', $text, -1, PREG_SPLIT_DELIM_CAPTURE);
-
-  // PHP ensures that the array consists of alternating delimiters and
-  // literals, and begins and ends with a literal (inserting NULL as
-  // required). Therefore, the first chunk is always text:
-  $chunk_type = 'text';
-
-  // If a tag of $ignore_tags is found, it is stored in $open_tag and only
-  // removed when the closing tag is found. Until the closing tag is found,
-  // no replacements are made.
-  $open_tag = '';
-
-  for ($i = 0; $i < count($chunks); $i++) {
-    if ($chunk_type == 'text') {
-      // Only process this text if there are no unclosed $ignore_tags.
-      if ($open_tag == '') {
-        // If there is a match, inject a link into this chunk via the callback
-        // function contained in $task.
-        $chunks[$i] = preg_replace_callback($pattern, $task, $chunks[$i]);
-      }
-      // Text chunk is done, so next chunk must be a tag.
-      $chunk_type = 'tag';
-    }
-    else {
-      // Only process this tag if there are no unclosed $ignore_tags.
-      if ($open_tag == '') {
-        // Check whether this tag is contained in $ignore_tags.
-        if (preg_match("`<($ignore_tags)(?:\s|>)`i", $chunks[$i], $matches)) {
-          $open_tag = $matches[1];
-        }
-      }
-      // Otherwise, check whether this is the closing tag for $open_tag.
-      else {
-        if (preg_match("`<\/$open_tag>`i", $chunks[$i], $matches)) {
-          $open_tag = '';
-        }
-      }
-      // Tag chunk is done, so next chunk must be text.
-      $chunk_type = 'text';
-    }
-  }
-
-  // Revert back to the original comment contents
-  $text = implode($chunks);
-  _filter_url_escape_comments('', FALSE);
-  $text = preg_replace_callback('`<!--(.*?)-->`', '_filter_url_escape_comments', $text);
+  // Process text.
+  $text = preg_replace_callback($pattern, $task, $text);
 
   return $text;
+}
+
+/**
+ * Gets the desired filtering pattern.
+ */
+function _user_reference_filter_get_pattern() {
+  // drupal cache value goes here
+  // else process the pattern.
+  $pattern = variable_get('user_mention_pattern', 0);
+
+  switch ($pattern) {
+    case 0 :
+      $pattern = "/[^\S]@([a-z0-9(\.\_\-\?\&\%\#)]+)/i";
+      break;
+    default :
+      $pattern = "/[^\S]@([a-z0-9(\.\_\-\?\&\%\#)]+)/i";
+      break;
+  }
+
+  return $pattern;
 }
 
 /**
@@ -102,38 +69,58 @@ function _user_reference_filter_process($text, $filter) {
 function _user_reference_parse_usernames($match) {
   $user = NULL;
 
+  $username = $match[1];
+
   // Get the username from match array. If its completely numberic, try loading
-  // user by uid matching.
+  // user by uid matching. (do not allow anonymous to be processed).
   if (is_numeric($match[1]) && ($match[1] != 0)) {
-    $user = user_load($match[1]);
+    //$match[1] = _user_reference_filter_remove_blacklisted_user(array($match[1])) ? $match[1] : NULL;
+    $user = $match[1] ? user_load($match[1]) : NULL;
   }
+
   // if realname module, get the user object from the realname value.
   elseif (module_exists('realname')) {
     $name = check_plain(decode_entities($match[1]));
     $name = str_replace('_', ' ', $name);
     $uid = db_query("SELECT uid, realname FROM {realname} WHERE realname IN (:realname)", array(':realname' => $name))->fetchAssoc();
-    $user = !empty($uid) ? user_load($uid['uid']) : NULL;
+    //$uid = _user_reference_filter_remove_blacklisted_user(array($uid));
+    $user = $uid ? user_load($uid['uid']) : NULL;
   }
 
   // if realname or uid doesn't return anything, try getting user from username
   // match.
-  $account = empty($user) ? user_load_by_name($match[1]) : $user;
-
-  if (!empty($account)) {
-    // If username or realname returns, return a link to the users profile page.
-    return theme('user_reference_filter_format', array('account' => $account));
+  $user = empty($user) ? user_load_by_name($username) : $user;
+/*
+  if ($user) {
+    $user = _user_reference_filter_remove_blacklisted_user(array($user->uid)) ? $user : NULL;
   }
+*/
+
+  // If username or realname returns, return a link to the users profile page.
+  if (!empty($user)) {
+    return theme('user_reference_filter_format', array('account' => $user));
+  }
+
+  // else just return the original text (first component in the match array).
   else {
-    // else just return the original text (first component in the match array).
     return $match[0];
   }
+}
+
+/**
+ * Run potential usernames, realnames, and uid's through a blacklist.
+ */
+function _user_reference_filter_remove_blacklisted_user($uid) {
+  //variable_get('user_reference_blacklist', array(0));
+  //return array_diff($uid, variable_get('user_reference_blacklist', array()));
+  return TRUE;
 }
 
 /**
  * Filter tips callback for user_reference_filter_format filter.
  */
 function _user_reference_filter_tips($filter, $format, $long = FALSE) {
-  return t('<em>@user_reference</em> is replaced with the a link to that users profile page.');
+  return t('<em>@User_Name</em> is replaced with the a link to that users profile page.');
 }
 
 /**
@@ -149,47 +136,22 @@ function user_reference_filter_format_theme() {
 
 /**
  * Returns HTML for a username, potentially linked to the user's page.
- *
- * @param $variables
- *  This theme function is similar to theme_username. It's roots are in that
- *  theme function.
- *   An associative array containing:
- *   - account: The user object to format.
- *   - name: The user's name, sanitized.
- *   - extra: Additional text to append to the user's name, sanitized.
- *   - link_path: The path or URL of the user's profile page, home page, or
- *     other desired page to link to for more information about the user.
- *   - link_options: An array of options to pass to the l() function's $options
- *     parameter if linking the user's name to the user's page.
- *   - attributes_array: An array of attributes to pass to the
- *     drupal_attributes() function if not linking to the user's page.
- *
- * @see template_preprocess_username_reference_filter_format()
- * @see template_preprocess_username_reference_filter_format()
  */
 function theme_user_reference_filter_format($variables) {
   if (isset($variables['link_path'])) {
     // We have a link path, so we should generate a link using l().
-    // Additional classes may be added as array elements like
-    // $variables['link_options']['attributes']['class'][] = 'myclass';
     $output = l($variables['prefix'] . $variables['name'] . $variables['extra'], $variables['link_path'], $variables['link_options']);
   }
   else {
-    // Modules may have added important attributes so they must be included
-    // in the output. Additional classes may be added as array elements like
-    // $variables['attributes_array']['class'][] = 'myclass';
+    // Modules may have added important attributes so they must be included in the output.
     $output = '<span' . drupal_attributes($variables['attributes_array']) . '>' . $variables['prefix'] . $variables['name'] . $variables['extra'] . '</span>';
   }
+
   return $output;
 }
 
 /**
- * Implements template_preprocess_HOOK().
- *
- * Preprocess function for theme_username_reference_filter_format. This function
- * handles making sure that the links are proper to all users and makes sure all
- * elements are ready to rock and roll.
- *
+ * Implements template_preprocess_user_reference_filter_format().
  */
 function template_preprocess_user_reference_filter_format(&$variables) {
   $account = $variables ['account'];
